@@ -8,7 +8,7 @@ clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
 
 insmod:
-	sudo insmod enc28j60.ko
+	sudo insmod $(basename ${obj-m}).ko
 
 rmmod:
-	sudo rmmod enc28j60
+	sudo rmmod $(basename ${obj-m})
