@@ -6,10 +6,6 @@
 
 #define DRIVER_NAME "enc28j60kai"
 
-struct enc_device {
-    struct spi_device *spi;
-};
-
 enum bank_number {
 	BANK_0 = 0,
 	BANK_1 = 1,
@@ -37,7 +33,7 @@ const struct control_register ECON2	= CONTROL_REGISTER(BANK_COMMON, 0x1e);
 const struct control_register ECON1	= CONTROL_REGISTER(BANK_COMMON, 0x1f);
 
 /* Bank 3 */
-const static struct control_register EREVID = CONTROL_REGISTER(BANK_3, 0x12);
+const struct control_register EREVID = CONTROL_REGISTER(BANK_3, 0x12);
 
 #define ECON1_BSEL1 0x02
 #define ECON1_BSEL0 0x01
@@ -96,11 +92,11 @@ static void spi_enc_write(struct spi_device *spi, enum spi_command com, struct c
 		}
 	};
 	uint8_t txbuf[2] = {spi_op.raw8, data};
-	uint8_t rxbuf[1];
+	uint8_t rxbuf;
 
 	enc_set_bank(spi, reg.bank);
 
-	spi_write_then_read(spi, txbuf, 2, rxbuf, 1);
+	spi_write_then_read(spi, txbuf, 2, &rxbuf, 1);
 }
 
 static void enc_set_bank(struct spi_device *spi, enum bank_number bank)
@@ -111,9 +107,36 @@ static void enc_set_bank(struct spi_device *spi, enum bank_number bank)
 	}
 }
 
+
+static int enc_netdev_open(struct net_device *dev)
+{
+	return 0;
+}
+
+static int enc_netdev_stop(struct net_device *dev)
+{
+	return 0;
+}
+
+static netdev_tx_t enc_start_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	struct enc_driver_data *priv = netdev_priv(dev);
+
+	dev_info(&priv->spi->dev, "%s: called", __func__);
+
+	return NETDEV_TX_OK;
+}
+
+static const struct net_device_ops enc_netdev_ops = {
+	.ndo_open = enc_netdev_open,
+	.ndo_stop = enc_netdev_stop,
+	.ndo_start_xmit = enc_start_xmit,
+	.ndo_validate_addr = eth_validate_addr
+};
+
 static int enc_probe(struct spi_device *spi)
 {
-	int revision;
+	int ret, revision;
 	struct net_device *netdev;
 	struct enc_driver_data *priv;
 
@@ -131,10 +154,18 @@ static int enc_probe(struct spi_device *spi)
 	enc_soft_reset(spi);
 
 	revision = spi_enc_read(spi, SPI_COM_RCR, EREVID);
-	dev_info(&spi->dev, "probe: revision=%d", revision);
+	dev_info(&spi->dev, "%s: revision=%d", __func__, revision);
 
 	if (revision == 0 || revision == 0xff) {
 		return -EINVAL;
+	}
+
+	netdev->if_port = IF_PORT_10BASET;
+	netdev->netdev_ops = &enc_netdev_ops;
+
+	ret = register_netdev(netdev);
+	if (ret) {
+		return ret;
 	}
 
 	return 0;
@@ -147,7 +178,11 @@ static int enc_remove(struct spi_device *spi)
 {
 	struct enc_driver_data *priv = spi_get_drvdata(spi);
 
-	dev_info(&priv->spi->dev, "%s: remove", DRIVER_NAME);
+	dev_info(&spi->dev, "%s", __func__);
+
+	unregister_netdev(priv->netdev);
+	free_netdev(priv->netdev);
+
 	return 0;
 }
 
