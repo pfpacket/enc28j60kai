@@ -3,58 +3,13 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/delay.h>
+#include "enc28j60kai.h"
 
 #define DRIVER_NAME "enc28j60kai"
 
-enum bank_number {
-	BANK_0 = 0,
-	BANK_1 = 1,
-	BANK_2 = 2,
-	BANK_3 = 3,
-	BANK_COMMON = 255,
-};
+#define MAC_MAX_FRAME_LEN 1518
 
-struct control_register {
-	enum bank_number bank;
-	uint8_t address;
-};
-
-#define CONTROL_REGISTER(b, a) \
-	{ \
-		.bank = (b), \
-		.address = (a) \
-	}
-
-/* Common registers */
-const struct control_register EIE	= CONTROL_REGISTER(BANK_COMMON, 0x1b);
-const struct control_register EIR	= CONTROL_REGISTER(BANK_COMMON, 0x1c);
-const struct control_register ESTAT	= CONTROL_REGISTER(BANK_COMMON, 0x1d);
-const struct control_register ECON2	= CONTROL_REGISTER(BANK_COMMON, 0x1e);
-const struct control_register ECON1	= CONTROL_REGISTER(BANK_COMMON, 0x1f);
-
-/* Bank 3 */
-const struct control_register EREVID = CONTROL_REGISTER(BANK_3, 0x12);
-
-#define ECON1_BSEL1 0x02
-#define ECON1_BSEL0 0x01
-
-enum spi_command {
-	SPI_COM_RCR = 0x0,
-	SPI_COM_RBM = 0x1,
-	SPI_COM_WCR = 0x2,
-	SPI_COM_WBM = 0x3,
-	SPI_COM_BFS = 0x4,
-	SPI_COM_BFC = 0x5,
-	SPI_COM_SRC = 0xff,
-};
-
-union spi_operation {
-	uint8_t raw8;
-	struct __attribute__ ((packed)) {
-		uint8_t arg:5;
-		uint8_t opcode:3;
-	} op;
-};
+static const uint8_t DEFAULT_MAC_ADDR[6] = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
 
 struct enc_driver_data {
 	struct net_device *netdev;
@@ -110,6 +65,8 @@ static void enc_set_bank(struct spi_device *spi, enum bank_number bank)
 
 static int enc_netdev_open(struct net_device *dev)
 {
+	struct enc_driver_data *priv = netdev_priv(dev);
+
 	return 0;
 }
 
@@ -127,12 +84,98 @@ static netdev_tx_t enc_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	return NETDEV_TX_OK;
 }
 
+static int enc_set_mac_addr(struct enc_driver_data *priv, const char *address)
+{
+	const char *addr = address;
+	spi_enc_write(priv->spi, SPI_COM_WCR, MAADR6, addr[0]);
+	spi_enc_write(priv->spi, SPI_COM_WCR, MAADR5, addr[1]);
+	spi_enc_write(priv->spi, SPI_COM_WCR, MAADR4, addr[2]);
+	spi_enc_write(priv->spi, SPI_COM_WCR, MAADR3, addr[3]);
+	spi_enc_write(priv->spi, SPI_COM_WCR, MAADR2, addr[4]);
+	spi_enc_write(priv->spi, SPI_COM_WCR, MAADR1, addr[5]);
+	return 0;
+}
+
+static int enc_set_mac_address(struct net_device *dev, void *addr)
+{
+	const char *a = addr;
+	struct enc_driver_data *priv = netdev_priv(dev);
+
+	dev_info(&priv->spi->dev, "%s: %x:%x:%x:%x:%x:%x",
+			__func__, a[5], a[4], a[3], a[2], a[1], a[0]);
+
+	return enc_set_mac_addr(priv, addr);
+}
+
 static const struct net_device_ops enc_netdev_ops = {
 	.ndo_open = enc_netdev_open,
 	.ndo_stop = enc_netdev_stop,
 	.ndo_start_xmit = enc_start_xmit,
-	.ndo_validate_addr = eth_validate_addr
+	.ndo_validate_addr = eth_validate_addr,
+	.ndo_set_mac_address = enc_set_mac_address
 };
+
+static int enc_init_rx(struct enc_driver_data *priv)
+{
+	struct spi_device *spi = priv->spi;
+	uint8_t enable_rx, macon3, enable_defer;
+
+	/*
+	 * Ether initialization
+	 */
+	spi_enc_write(spi, SPI_COM_WCR, ETXSTL, 0x00);
+	spi_enc_write(spi, SPI_COM_WCR, ETXSTH, 0x00);
+
+	spi_enc_write(spi, SPI_COM_WCR, ETXNDL, INT16_L(ENC_TX_BUF_SIZE));
+	spi_enc_write(spi, SPI_COM_WCR, ETXNDH, INT16_H(ENC_TX_BUF_SIZE));
+
+	spi_enc_write(spi, SPI_COM_WCR, ERXSTL, INT16_L(ENC_RX_START_ADDR));
+	spi_enc_write(spi, SPI_COM_WCR, ERXSTH, INT16_H(ENC_RX_START_ADDR));
+
+	spi_enc_write(spi, SPI_COM_WCR, ERXNDL, INT16_L(ENC_RX_END_ADDR));
+	spi_enc_write(spi, SPI_COM_WCR, ERXNDH, INT16_H(ENC_RX_END_ADDR));
+
+	/* Discard ethernet frames with invalid CRCs */
+	spi_enc_write(spi, SPI_COM_BFS, ERXFCON, ERXFCON_CRCEN);
+
+	/*
+	 * MAC initialization
+	 */
+	while (spi_enc_read(spi, SPI_COM_RCR, ESTAT) & ESTAT_CLKRDY) {
+		dev_info(&spi->dev, "%s: polling ESTAT_CLKRDY", __func__);
+	}
+
+	enable_rx = spi_enc_read(spi, SPI_COM_WCR, MACON1) |
+		MACON1_MARXEN | MACON1_RXPAUS | MACON1_TXPAUS;
+	spi_enc_write(spi, SPI_COM_WCR, MACON1, enable_rx);
+
+	macon3 = spi_enc_read(spi, SPI_COM_WCR, MACON3) |
+		MACON3_FULLDPX | MACON3_FRMLNEN | MACON3_TXCRCEN | PADCFG_60;
+	spi_enc_write(spi, SPI_COM_WCR, MACON3, macon3);
+
+	enable_defer = spi_enc_read(spi, SPI_COM_WCR, MACON4) | MACON4_DEFER;
+	spi_enc_write(spi, SPI_COM_WCR, MACON4, enable_defer);
+
+	spi_enc_write(spi, SPI_COM_WCR, MAMXFLL, INT16_L(MAC_MAX_FRAME_LEN));
+	spi_enc_write(spi, SPI_COM_WCR, MAMXFLH, INT16_H(MAC_MAX_FRAME_LEN));
+
+	spi_enc_write(spi, SPI_COM_WCR,	MABBIPG, 0x15);
+
+	spi_enc_write(spi, SPI_COM_WCR,	MAIPGL, 0x12);
+
+	enc_set_mac_addr(priv, DEFAULT_MAC_ADDR);
+
+	dev_info(&spi->dev, "%s: ETXNDH:ETXNDL=%x:%x H:L=%x:%x ERXFCON=%x",
+			__func__,
+			spi_enc_read(spi, SPI_COM_RCR, ETXNDH),
+			spi_enc_read(spi, SPI_COM_RCR, ETXNDL),
+			INT16_H(ENC_TX_BUF_SIZE),
+			INT16_L(ENC_TX_BUF_SIZE),
+			spi_enc_read(spi, SPI_COM_RCR, ERXFCON)
+			);
+
+	return 0;
+}
 
 static int enc_probe(struct spi_device *spi)
 {
@@ -167,6 +210,8 @@ static int enc_probe(struct spi_device *spi)
 	if (ret) {
 		return ret;
 	}
+
+	enc_init_rx(priv);
 
 	return 0;
 
