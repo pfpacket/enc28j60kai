@@ -160,14 +160,19 @@ const struct phy_register PHLCON	= PHY_REGISTER(0x14);
 
 #define PHCON2_HDLDIS		0b0000000100000000
 
-
-enum spi_command {
+enum spi_command_read {
 	SPI_COM_RCR = 0x0,
 	SPI_COM_RBM = 0x1,
+};
+
+enum spi_command_write {
 	SPI_COM_WCR = 0x2,
 	SPI_COM_WBM = 0x3,
 	SPI_COM_BFS = 0x4,
 	SPI_COM_BFC = 0x5,
+};
+
+enum spi_command {
 	SPI_COM_SRC = 0xff,
 };
 

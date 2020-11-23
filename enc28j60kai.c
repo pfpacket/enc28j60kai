@@ -32,6 +32,7 @@ struct enc_adapter {
 	struct net_device *netdev;
 	struct spi_device *spi;
 	struct task_struct *poller;
+	enum bank_number current_bank;
 };
 
 static void enc_soft_reset(struct enc_adapter *adapter)
@@ -42,7 +43,7 @@ static void enc_soft_reset(struct enc_adapter *adapter)
 
 static void enc_set_bank(struct enc_adapter *adapter, enum bank_number bank);
 
-static uint8_t spi_enc_read(struct enc_adapter *adapter, enum spi_command com, struct control_register reg)
+static uint8_t spi_enc_read(struct enc_adapter *adapter, enum spi_command_read com, struct control_register reg)
 {
 	union spi_operation spi_op = {
 		.op = {
@@ -56,7 +57,7 @@ static uint8_t spi_enc_read(struct enc_adapter *adapter, enum spi_command com, s
 	return (uint8_t)spi_w8r8(adapter->spi, spi_op.raw8);
 }
 
-static void spi_enc_write(struct enc_adapter *adapter, enum spi_command com, struct control_register reg, uint8_t data)
+static void spi_enc_write(struct enc_adapter *adapter, enum spi_command_write com, struct control_register reg, uint8_t data)
 {
 	union spi_operation spi_op = {
 		.op = {
@@ -65,11 +66,10 @@ static void spi_enc_write(struct enc_adapter *adapter, enum spi_command com, str
 		}
 	};
 	uint8_t txbuf[2] = {spi_op.raw8, data};
-	uint8_t rxbuf;
 
 	enc_set_bank(adapter, reg.bank);
 
-	spi_write_then_read(adapter->spi, txbuf, 2, &rxbuf, 1);
+	spi_write(adapter->spi, txbuf, 2);
 }
 
 static void spi_enc_wait_for_phy_busy(struct enc_adapter *adapter)
@@ -104,6 +104,7 @@ static void spi_enc_write_phy(struct enc_adapter *adapter, struct phy_register r
 {
 	spi_enc_write(adapter, SPI_COM_WCR, MIREGADR, reg.address);
 
+	dev_info(&adapter->spi->dev, "%s: INT_H=%x INT_L=%x", __func__, INT16_H(data), INT16_L(data));
 	spi_enc_write(adapter, SPI_COM_WCR, MIWRL, INT16_L(data));
 	spi_enc_write(adapter, SPI_COM_WCR, MIWRH, INT16_H(data));
 
@@ -112,9 +113,10 @@ static void spi_enc_write_phy(struct enc_adapter *adapter, struct phy_register r
 
 static void enc_set_bank(struct enc_adapter *adapter, enum bank_number bank)
 {
-	if (bank != BANK_COMMON) {
+	if (bank != BANK_COMMON && bank != adapter->current_bank) {
 		spi_enc_write(adapter, SPI_COM_BFC, ECON1, ECON1_BSEL1 | ECON1_BSEL0);
 		spi_enc_write(adapter, SPI_COM_BFS, ECON1, bank);
+		adapter->current_bank = bank;
 	}
 }
 
@@ -266,14 +268,16 @@ static int enc_init_rx(struct enc_adapter *adapter)
 	 * Padding configuration
 	 * */
 	spi_enc_write(adapter, SPI_COM_WCR, MACON3, /*MACON3_FULLDPX |*/ MACON3_FRMLNEN | MACON3_TXCRCEN | PADCFG_60);
+	dev_info(&adapter->spi->dev, "%s: expected=%x MACON3=%x",
+			__func__,
+			/*MACON3_FULLDPX |*/ MACON3_FRMLNEN | MACON3_TXCRCEN | PADCFG_60,
+			spi_enc_read(adapter, SPI_COM_RCR, MACON3));
 
-	//spi_enc_write(adapter, SPI_COM_WCR, MACON4, MACON4_DEFER);
+	spi_enc_write(adapter, SPI_COM_WCR, MACON4, MACON4_DEFER);
 
 	spi_enc_write(adapter, SPI_COM_WCR, MAMXFLL, INT16_L(MAC_MAX_FRAME_LEN));
 	spi_enc_write(adapter, SPI_COM_WCR, MAMXFLH, INT16_H(MAC_MAX_FRAME_LEN));
 
-	//spi_enc_write(adapter, SPI_COM_WCR, MAIPGL, 0x12);
-	//spi_enc_write(adapter, SPI_COM_WCR, MABBIPG, 0x15);
 	spi_enc_write(adapter, SPI_COM_WCR, MAIPGL, 0x12);
 	spi_enc_write(adapter, SPI_COM_WCR, MAIPGH, 0x0c);
 	spi_enc_write(adapter, SPI_COM_WCR, MABBIPG, 0x12);
@@ -283,11 +287,10 @@ static int enc_init_rx(struct enc_adapter *adapter)
 	/*
 	 * PHY initialization
 	 */
-	dev_info(&adapter->spi->dev, "%s: PHCON1=%x", __func__, spi_enc_read_phy(adapter, PHCON1));
-	//spi_enc_write_phy(adapter, PHCON1, PHCON1_PDPXMD);
-	//spi_enc_write_phy(adapter, PHCON2, PHCON2_HDLDIS);
-
-	enc_set_bank(adapter, BANK_0);
+	dev_info(&adapter->spi->dev, "%s: PHLCON=%x", __func__, spi_enc_read_phy(adapter, PHLCON));
+	dev_info(&adapter->spi->dev, "%s: PHCON2=%x", __func__, spi_enc_read_phy(adapter, PHCON2));
+	spi_enc_write_phy(adapter, PHCON2, PHCON2_HDLDIS);
+	dev_info(&adapter->spi->dev, "%s: PHCON2=%x", __func__, spi_enc_read_phy(adapter, PHCON2));
 
 	/* enable IRQ */
 	spi_enc_write(adapter, SPI_COM_BFS, EIE, EIE_INTIE | EIE_PKTIE);
@@ -311,11 +314,13 @@ static int enc_probe(struct spi_device *spi)
 	adapter = netdev_priv(netdev);
 	adapter->netdev = netdev;
 	adapter->spi = spi;
+	adapter->current_bank = BANK_COMMON;	/* to let enc_set_bank(BANK_0) work */
 	spi_set_drvdata(spi, adapter);
-
 	SET_NETDEV_DEV(netdev, &spi->dev);
 
 	enc_soft_reset(adapter);
+	enc_set_bank(adapter, BANK_0);
+
 	spi_enc_write(adapter, SPI_COM_WCR, ECON1, 0x00);
 	spi_enc_write(adapter, SPI_COM_WCR, ECON2, ECON2_AUTOINC);
 
