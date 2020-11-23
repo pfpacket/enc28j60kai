@@ -6,7 +6,7 @@ enum bank_number {
 	BANK_1 = 1,
 	BANK_2 = 2,
 	BANK_3 = 3,
-	BANK_COMMON = 255,
+	BANK_COMMON = 4,
 };
 
 struct control_register {
@@ -48,6 +48,7 @@ const struct control_register ERXWRPTH	= CONTROL_REGISTER(BANK_0, 0x0f);
 
 /* Bank 1 */
 const struct control_register ERXFCON	= CONTROL_REGISTER(BANK_1, 0x18);
+const struct control_register EPKTCNT	= CONTROL_REGISTER(BANK_1, 0x19);
 
 /* Bank 2 */
 const struct control_register MACON1	= CONTROL_REGISTER(BANK_2, 0x00);
@@ -55,20 +56,36 @@ const struct control_register MACON3	= CONTROL_REGISTER(BANK_2, 0x02);
 const struct control_register MACON4	= CONTROL_REGISTER(BANK_2, 0x03);
 const struct control_register MABBIPG	= CONTROL_REGISTER(BANK_2, 0x04);
 const struct control_register MAIPGL	= CONTROL_REGISTER(BANK_2, 0x06);
+const struct control_register MAIPGH	= CONTROL_REGISTER(BANK_2, 0x07);
 const struct control_register MAMXFLL	= CONTROL_REGISTER(BANK_2, 0x0a);
 const struct control_register MAMXFLH	= CONTROL_REGISTER(BANK_2, 0x0b);
+const struct control_register MICMD	= CONTROL_REGISTER(BANK_2, 0x12);
+const struct control_register MIREGADR	= CONTROL_REGISTER(BANK_2, 0x14);
 
 /* Bank 3 */
-const struct control_register MAADR5 = CONTROL_REGISTER(BANK_3, 0x00);
-const struct control_register MAADR6 = CONTROL_REGISTER(BANK_3, 0x01);
-const struct control_register MAADR3 = CONTROL_REGISTER(BANK_3, 0x02);
-const struct control_register MAADR4 = CONTROL_REGISTER(BANK_3, 0x03);
-const struct control_register MAADR1 = CONTROL_REGISTER(BANK_3, 0x04);
-const struct control_register MAADR2 = CONTROL_REGISTER(BANK_3, 0x05);
-const struct control_register EREVID = CONTROL_REGISTER(BANK_3, 0x12);
+const struct control_register MAADR5	= CONTROL_REGISTER(BANK_3, 0x00);
+const struct control_register MAADR6	= CONTROL_REGISTER(BANK_3, 0x01);
+const struct control_register MAADR3	= CONTROL_REGISTER(BANK_3, 0x02);
+const struct control_register MAADR4	= CONTROL_REGISTER(BANK_3, 0x03);
+const struct control_register MAADR1	= CONTROL_REGISTER(BANK_3, 0x04);
+const struct control_register MAADR2	= CONTROL_REGISTER(BANK_3, 0x05);
+const struct control_register MISTAT	= CONTROL_REGISTER(BANK_2, 0x0a);
+const struct control_register EREVID	= CONTROL_REGISTER(BANK_3, 0x12);
+
+#define EIE_INTIE		0b10000000
+#define EIE_PKTIE		0b01000000
 
 #define ECON1_BSEL0		0b00000001
 #define ECON1_BSEL1		0b00000010
+#define ECON1_RXEN		0b00000100
+#define ECON1_TXRTS		0b00001000
+#define ECON1_CSUMEN		0b00010000
+#define ECON1_DMAST		0b00100000
+#define ECON1_RXRST		0b01000000
+#define ECON1_TXRST		0b10000000
+
+#define ECON2_VRPS		0b00001000
+#define ECON2_AUTOINC		0b10000000
 
 #define ERXFCON_CRCEN		0b00010000
 
@@ -91,13 +108,38 @@ const struct control_register EREVID = CONTROL_REGISTER(BANK_3, 0x12);
 
 #define MACON4_DEFER		0b01000000
 
+#define MICMD_MIISCAN		0b00000010
+#define MICMD_MIIRD		0b00000001
 
-const uint16_t ENC_TX_BUF_SIZE = 1024 * 3 - 1;
-const uint16_t ENC_RX_START_ADDR = ENC_TX_BUF_SIZE + 1;
-const uint16_t ENC_RX_END_ADDR = 0x1fff;
+/*
+ * PHY registers
+ *
+ * Unlike control registers, PHY registers are not directly accessible
+ * through the SPI commands
+ */
+struct phy_register {
+	uint8_t address;
+};
 
-#define INT16_L(n) (uint8_t)((n) & 0xff)
-#define INT16_H(n) (uint8_t)((n) >> 8)
+#define PHY_REGISTER(addr) \
+	{ \
+		.address = (addr) \
+	}
+
+const struct phy_register PHCON1	= PHY_REGISTER(0x00);
+const struct phy_register PHSTAT1	= PHY_REGISTER(0x01);
+const struct phy_register PHID1		= PHY_REGISTER(0x02);
+const struct phy_register PHID2		= PHY_REGISTER(0x03);
+const struct phy_register PHCON2	= PHY_REGISTER(0x10);
+const struct phy_register PHSTAT2	= PHY_REGISTER(0x11);
+const struct phy_register PHIE		= PHY_REGISTER(0x12);
+const struct phy_register PHIR		= PHY_REGISTER(0x13);
+const struct phy_register PHLCON	= PHY_REGISTER(0x14);
+
+#define PHCON1_PDPXMD		0b0000000100000000
+
+#define PHCON2_HDLDIS		0b0000000100000000
+
 
 enum spi_command {
 	SPI_COM_RCR = 0x0,
