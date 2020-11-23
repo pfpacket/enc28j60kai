@@ -72,17 +72,42 @@ static void spi_enc_write(struct enc_adapter *adapter, enum spi_command com, str
 	spi_write_then_read(adapter->spi, txbuf, 2, &rxbuf, 1);
 }
 
-static uint8_t spi_enc_read_phy(struct enc_adapter *adapter, struct phy_register reg)
+static void spi_enc_wait_for_phy_busy(struct enc_adapter *adapter)
+{
+	while (spi_enc_read(adapter, SPI_COM_RCR, MISTAT) & MISTAT_BUSY) {
+		dev_warn(&adapter->spi->dev, "%s: pollnig MISTAT_BUSY", __func__);
+		udelay(10);
+	}
+}
+
+static uint16_t spi_enc_read_phy(struct enc_adapter *adapter, struct phy_register reg)
 {
 	uint8_t micmd;
 
 	spi_enc_write(adapter, SPI_COM_WCR, MIREGADR, reg.address);
+
 	micmd = spi_enc_read(adapter, SPI_COM_RCR, MICMD) | MICMD_MIIRD;
 	spi_enc_write(adapter, SPI_COM_WCR, MICMD, micmd);
 
 	udelay(20);
+	spi_enc_wait_for_phy_busy(adapter);
+
+	micmd &= ~MICMD_MIIRD;
+	spi_enc_write(adapter, SPI_COM_WCR, MICMD, micmd);
+
+	return spi_enc_read(adapter, SPI_COM_RCR, MIRDL) |
+		(spi_enc_read(adapter, SPI_COM_RCR, MIRDH) << 8);
+}
 
 
+static void spi_enc_write_phy(struct enc_adapter *adapter, struct phy_register reg, uint16_t data)
+{
+	spi_enc_write(adapter, SPI_COM_WCR, MIREGADR, reg.address);
+
+	spi_enc_write(adapter, SPI_COM_WCR, MIWRL, INT16_L(data));
+	spi_enc_write(adapter, SPI_COM_WCR, MIWRH, INT16_H(data));
+
+	spi_enc_wait_for_phy_busy(adapter);
 }
 
 static void enc_set_bank(struct enc_adapter *adapter, enum bank_number bank)
@@ -203,7 +228,9 @@ static int enc_init_rx(struct enc_adapter *adapter)
 	spi_enc_write(adapter, SPI_COM_WCR, ERXRDPTL, INT16_L(ENC_RX_START_ADDR));
 	spi_enc_write(adapter, SPI_COM_WCR, ERXRDPTH, INT16_H(ENC_RX_START_ADDR));
 
-	dev_info(&adapter->spi->dev, "%s: ENC_RX_START_ADDR=%x ENC_RX_END_ADDR=%x", __func__, ENC_RX_START_ADDR, ENC_RX_END_ADDR);
+	dev_info(&adapter->spi->dev, "%s: ENC_RX_START_ADDR=%x ENC_RX_END_ADDR=%x", __func__,
+			spi_enc_read(adapter, SPI_COM_RCR, ERXSTL),
+			(spi_enc_read(adapter, SPI_COM_RCR, ERXNDH) << 8) | spi_enc_read(adapter, SPI_COM_RCR, ERXNDL));
 
 	/* TX buffer start pointer */
 	spi_enc_write(adapter, SPI_COM_WCR, ETXSTL, INT16_L(ENC_TX_START_ADDR));
@@ -256,8 +283,9 @@ static int enc_init_rx(struct enc_adapter *adapter)
 	/*
 	 * PHY initialization
 	 */
-	spi_enc_write(adapter, SPI_COM_WCR, PHCON1, PHCON1_PDPXMD);
-	spi_enc_write(adapter, SPI_COM_WCR, PHCON2, PHCON2_HDLDIS);
+	dev_info(&adapter->spi->dev, "%s: PHCON1=%x", __func__, spi_enc_read_phy(adapter, PHCON1));
+	//spi_enc_write_phy(adapter, PHCON1, PHCON1_PDPXMD);
+	//spi_enc_write_phy(adapter, PHCON2, PHCON2_HDLDIS);
 
 	enc_set_bank(adapter, BANK_0);
 

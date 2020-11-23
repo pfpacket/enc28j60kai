@@ -61,6 +61,10 @@ const struct control_register MAMXFLL	= CONTROL_REGISTER(BANK_2, 0x0a);
 const struct control_register MAMXFLH	= CONTROL_REGISTER(BANK_2, 0x0b);
 const struct control_register MICMD	= CONTROL_REGISTER(BANK_2, 0x12);
 const struct control_register MIREGADR	= CONTROL_REGISTER(BANK_2, 0x14);
+const struct control_register MIWRL	= CONTROL_REGISTER(BANK_2, 0x16);
+const struct control_register MIWRH	= CONTROL_REGISTER(BANK_2, 0x17);
+const struct control_register MIRDL	= CONTROL_REGISTER(BANK_2, 0x18);
+const struct control_register MIRDH	= CONTROL_REGISTER(BANK_2, 0x19);
 
 /* Bank 3 */
 const struct control_register MAADR5	= CONTROL_REGISTER(BANK_3, 0x00);
@@ -72,8 +76,20 @@ const struct control_register MAADR2	= CONTROL_REGISTER(BANK_3, 0x05);
 const struct control_register MISTAT	= CONTROL_REGISTER(BANK_2, 0x0a);
 const struct control_register EREVID	= CONTROL_REGISTER(BANK_3, 0x12);
 
-#define EIE_INTIE		0b10000000
+#define EIE_RXERIE		0b00000001
+#define EIE_TXERIE		0b00000010
+#define EIE_TXIE		0b00001000
+#define EIE_LINKIE		0b00010000
+#define EIE_DMAIE		0b00100000
 #define EIE_PKTIE		0b01000000
+#define EIE_INTIE		0b10000000
+
+#define EIR_RXERIF		0b00000001
+#define EIR_TXERIF		0b00000010
+#define EIR_TXIF		0b00001000
+#define EIR_LINKIF		0b00010000
+#define EIR_DMAIF		0b00100000
+#define EIR_PKTIF		0b01000000
 
 #define ECON1_BSEL0		0b00000001
 #define ECON1_BSEL1		0b00000010
@@ -87,7 +103,7 @@ const struct control_register EREVID	= CONTROL_REGISTER(BANK_3, 0x12);
 #define ECON2_VRPS		0b00001000
 #define ECON2_AUTOINC		0b10000000
 
-#define ERXFCON_CRCEN		0b00010000
+#define ERXFCON_CRCEN		0b00100000
 
 #define ESTAT_CLKRDY		0b00000001
 
@@ -98,7 +114,7 @@ const struct control_register EREVID	= CONTROL_REGISTER(BANK_3, 0x12);
 
 #define MACON3_FULLDPX		0b00000001
 #define MACON3_FRMLNEN		0b00000010
-#define MACON3_HFRMLEN		0b00000100
+#define MACON3_HFRMEN		0b00000100
 #define MACON3_PHDREN		0b00001000
 #define MACON3_TXCRCEN		0b00010000
 #define MACON3_PADCFG0		0b00100000
@@ -110,6 +126,10 @@ const struct control_register EREVID	= CONTROL_REGISTER(BANK_3, 0x12);
 
 #define MICMD_MIISCAN		0b00000010
 #define MICMD_MIIRD		0b00000001
+
+#define MISTAT_BUSY		0b00000001
+#define MISTAT_SCAN		0b00000010
+#define MISTAT_INVALID		0b00000100
 
 /*
  * PHY registers
