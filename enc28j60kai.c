@@ -17,7 +17,6 @@
 const uint16_t ENC_RX_BUF_SIZE = 1024 * 5;
 const uint16_t ENC_RX_START_ADDR = 0;
 const uint16_t ENC_RX_END_ADDR = ENC_RX_START_ADDR + ENC_RX_BUF_SIZE - 1;
-
 const uint16_t ENC_TX_START_ADDR = ENC_RX_END_ADDR + 1;
 const uint16_t ENC_TX_END_ADDR = 0x1fff;
 
@@ -31,8 +30,9 @@ static struct sockaddr default_mac_addr = {
 struct enc_adapter {
 	struct net_device *netdev;
 	struct spi_device *spi;
-	struct task_struct *poller;
 	enum bank_number current_bank;
+	struct work_struct irq_work;
+	uint16_t next_packet_ptr;
 };
 
 static void enc_soft_reset(struct enc_adapter *adapter)
@@ -41,9 +41,20 @@ static void enc_soft_reset(struct enc_adapter *adapter)
 	udelay(2000);
 }
 
+static uint8_t spi_enc_read_buffer_memory(struct enc_adapter *adapter)
+{
+	return (uint8_t)spi_w8r8(adapter->spi, SPI_COM_RBM);
+}
+
+static void spi_enc_write_buffer_memory(struct enc_adapter *adapter, uint8_t data)
+{
+	uint8_t txbuf[2] = {SPI_COM_WBM, data};
+	spi_write(adapter->spi, txbuf, 2);
+}
+
 static void enc_set_bank(struct enc_adapter *adapter, enum bank_number bank);
 
-static uint8_t spi_enc_read(struct enc_adapter *adapter, enum spi_command_read com, struct control_register reg)
+static uint8_t spi_enc_read(struct enc_adapter *adapter, enum spi_command com, struct control_register reg)
 {
 	union spi_operation spi_op = {
 		.op = {
@@ -57,7 +68,7 @@ static uint8_t spi_enc_read(struct enc_adapter *adapter, enum spi_command_read c
 	return (uint8_t)spi_w8r8(adapter->spi, spi_op.raw8);
 }
 
-static void spi_enc_write(struct enc_adapter *adapter, enum spi_command_write com, struct control_register reg, uint8_t data)
+static void spi_enc_write(struct enc_adapter *adapter, enum spi_command com, struct control_register reg, uint8_t data)
 {
 	union spi_operation spi_op = {
 		.op = {
@@ -72,7 +83,7 @@ static void spi_enc_write(struct enc_adapter *adapter, enum spi_command_write co
 	spi_write(adapter->spi, txbuf, 2);
 }
 
-static void spi_enc_wait_for_phy_busy(struct enc_adapter *adapter)
+static void enc_wait_for_phy_ready(struct enc_adapter *adapter)
 {
 	while (spi_enc_read(adapter, SPI_COM_RCR, MISTAT) & MISTAT_BUSY) {
 		dev_warn(&adapter->spi->dev, "%s: pollnig MISTAT_BUSY", __func__);
@@ -90,7 +101,7 @@ static uint16_t spi_enc_read_phy(struct enc_adapter *adapter, struct phy_registe
 	spi_enc_write(adapter, SPI_COM_WCR, MICMD, micmd);
 
 	udelay(20);
-	spi_enc_wait_for_phy_busy(adapter);
+	enc_wait_for_phy_ready(adapter);
 
 	micmd &= ~MICMD_MIIRD;
 	spi_enc_write(adapter, SPI_COM_WCR, MICMD, micmd);
@@ -104,11 +115,10 @@ static void spi_enc_write_phy(struct enc_adapter *adapter, struct phy_register r
 {
 	spi_enc_write(adapter, SPI_COM_WCR, MIREGADR, reg.address);
 
-	dev_info(&adapter->spi->dev, "%s: INT_H=%x INT_L=%x", __func__, INT16_H(data), INT16_L(data));
 	spi_enc_write(adapter, SPI_COM_WCR, MIWRL, INT16_L(data));
 	spi_enc_write(adapter, SPI_COM_WCR, MIWRH, INT16_H(data));
 
-	spi_enc_wait_for_phy_busy(adapter);
+	enc_wait_for_phy_ready(adapter);
 }
 
 static void enc_set_bank(struct enc_adapter *adapter, enum bank_number bank)
@@ -120,21 +130,13 @@ static void enc_set_bank(struct enc_adapter *adapter, enum bank_number bank)
 	}
 }
 
-static int poll_pktcnt_thread(void *arg)
+static int enc_start_rx(struct enc_adapter *adapter)
 {
-	struct enc_adapter *adapter = arg;
+	/* Enable IRQ */
+	spi_enc_write(adapter, SPI_COM_BFS, EIE, EIE_INTIE | EIE_PKTIE);
 
-	dev_info(&adapter->spi->dev, "%s: polling", __func__);
-
-	while (!kthread_should_stop()) {
-		int pktcnt = spi_enc_read(adapter, SPI_COM_RCR, EPKTCNT);
-		if (pktcnt > 0)
-			dev_warn(&adapter->spi->dev, "%s: pktcnt=%d", __func__, pktcnt);
-
-		ssleep(1);
-	}
-
-	dev_info(&adapter->spi->dev, "%s: stopped polling", __func__);
+	/* Start RX */
+	spi_enc_write(adapter, SPI_COM_BFS, ECON1, ECON1_RXEN);
 
 	return 0;
 }
@@ -143,10 +145,7 @@ static int enc_netdev_open(struct net_device *dev)
 {
 	struct enc_adapter *adapter = netdev_priv(dev);
 
-	adapter->poller = kthread_run(poll_pktcnt_thread, adapter, "pktcnt-poller");
-	if (IS_ERR(adapter->poller)) {
-		return PTR_ERR(adapter->poller);
-	}
+	enc_start_rx(adapter);
 
 	netif_start_queue(adapter->netdev);
 
@@ -155,12 +154,7 @@ static int enc_netdev_open(struct net_device *dev)
 
 static int enc_netdev_stop(struct net_device *dev)
 {
-	struct enc_adapter *adapter = netdev_priv(dev);
-
 	netif_stop_queue(dev);
-
-	if (adapter->poller)
-		kthread_stop(adapter->poller);
 
 	return 0;
 }
@@ -176,9 +170,9 @@ static netdev_tx_t enc_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	return NETDEV_TX_OK;
 }
 
-static int enc_set_mac_addr(struct enc_adapter *adapter, const char *address)
+static int enc_write_mac_address(struct enc_adapter *adapter, const void *address)
 {
-	const char *addr = address;
+	const uint8_t *addr = address;
 
 	spi_enc_write(adapter, SPI_COM_WCR, MAADR6, addr[0]);
 	spi_enc_write(adapter, SPI_COM_WCR, MAADR5, addr[1]);
@@ -196,14 +190,15 @@ static int enc_set_mac_address(struct net_device *dev, void *addr)
 	struct enc_adapter *adapter = netdev_priv(dev);
 	struct sockaddr *sa = addr;
 
-	if ((ret = eth_mac_addr(dev, addr)))
+	ret = eth_mac_addr(dev, addr);
+	if (ret)
 		return ret;
 
 	dev_info(&adapter->spi->dev, "%s: %x:%x:%x:%x:%x:%x",
 			__func__, sa->sa_data[0], sa->sa_data[1], sa->sa_data[2],
 			sa->sa_data[3], sa->sa_data[4], sa->sa_data[5]);
 
-	return enc_set_mac_addr(adapter, addr);
+	return enc_write_mac_address(adapter, addr);
 }
 
 static const struct net_device_ops enc_netdev_ops = {
@@ -222,6 +217,7 @@ static int enc_init_rx(struct enc_adapter *adapter)
 	/* RX buffer start pointer */
 	spi_enc_write(adapter, SPI_COM_WCR, ERXSTL, INT16_L(ENC_RX_START_ADDR));
 	spi_enc_write(adapter, SPI_COM_WCR, ERXSTH, INT16_H(ENC_RX_START_ADDR));
+	adapter->next_packet_ptr = ENC_RX_START_ADDR;
 
 	/* RX buffer end pointer */
 	spi_enc_write(adapter, SPI_COM_WCR, ERXNDL, INT16_L(ENC_RX_END_ADDR));
@@ -229,10 +225,6 @@ static int enc_init_rx(struct enc_adapter *adapter)
 
 	spi_enc_write(adapter, SPI_COM_WCR, ERXRDPTL, INT16_L(ENC_RX_START_ADDR));
 	spi_enc_write(adapter, SPI_COM_WCR, ERXRDPTH, INT16_H(ENC_RX_START_ADDR));
-
-	dev_info(&adapter->spi->dev, "%s: ENC_RX_START_ADDR=%x ENC_RX_END_ADDR=%x", __func__,
-			spi_enc_read(adapter, SPI_COM_RCR, ERXSTL),
-			(spi_enc_read(adapter, SPI_COM_RCR, ERXNDH) << 8) | spi_enc_read(adapter, SPI_COM_RCR, ERXNDL));
 
 	/* TX buffer start pointer */
 	spi_enc_write(adapter, SPI_COM_WCR, ETXSTL, INT16_L(ENC_TX_START_ADDR));
@@ -244,7 +236,6 @@ static int enc_init_rx(struct enc_adapter *adapter)
 
 	/* Discard ethernet frames with invalid CRCs */
 	spi_enc_write(adapter, SPI_COM_WCR, ERXFCON, ERXFCON_CRCEN);
-	//spi_enc_write(adapter, SPI_COM_BFS, ERXFCON, ERXFCON_CRCEN);
 
 	/*
 	 * MAC initialization
@@ -262,16 +253,12 @@ static int enc_init_rx(struct enc_adapter *adapter)
 	spi_enc_write(adapter, SPI_COM_WCR, MACON1, MACON1_MARXEN | MACON1_RXPAUS | MACON1_TXPAUS);
 
 	/*
-	 * Enable frane length report
+	 * Enable frame length report
 	 * Enable full duplex mode
 	 * Enable TX CRC auto calculation
 	 * Padding configuration
 	 * */
 	spi_enc_write(adapter, SPI_COM_WCR, MACON3, /*MACON3_FULLDPX |*/ MACON3_FRMLNEN | MACON3_TXCRCEN | PADCFG_60);
-	dev_info(&adapter->spi->dev, "%s: expected=%x MACON3=%x",
-			__func__,
-			/*MACON3_FULLDPX |*/ MACON3_FRMLNEN | MACON3_TXCRCEN | PADCFG_60,
-			spi_enc_read(adapter, SPI_COM_RCR, MACON3));
 
 	spi_enc_write(adapter, SPI_COM_WCR, MACON4, MACON4_DEFER);
 
@@ -287,18 +274,133 @@ static int enc_init_rx(struct enc_adapter *adapter)
 	/*
 	 * PHY initialization
 	 */
-	dev_info(&adapter->spi->dev, "%s: PHLCON=%x", __func__, spi_enc_read_phy(adapter, PHLCON));
-	dev_info(&adapter->spi->dev, "%s: PHCON2=%x", __func__, spi_enc_read_phy(adapter, PHCON2));
 	spi_enc_write_phy(adapter, PHCON2, PHCON2_HDLDIS);
-	dev_info(&adapter->spi->dev, "%s: PHCON2=%x", __func__, spi_enc_read_phy(adapter, PHCON2));
-
-	/* enable IRQ */
-	spi_enc_write(adapter, SPI_COM_BFS, EIE, EIE_INTIE | EIE_PKTIE);
-
-	/* Start RX */
-	spi_enc_write(adapter, SPI_COM_BFS, ECON1, ECON1_RXEN);
 
 	return 0;
+}
+
+static irqreturn_t enc_irq_handler(int irq, void *dev)
+{
+	struct enc_adapter *adapter = dev;
+
+	schedule_work(&adapter->irq_work);
+
+	return IRQ_HANDLED;
+}
+
+static void enc_read_memory(struct enc_adapter *adapter, uint16_t addr, void *buf, size_t size)
+{
+	int i;
+	uint8_t *buffer = buf;
+
+	spi_enc_write(adapter, SPI_COM_WCR, ERDPTL, INT16_L(addr));
+	spi_enc_write(adapter, SPI_COM_WCR, ERDPTH, INT16_H(addr));
+
+	dev_info(&adapter->spi->dev, "%s: addr=%x size=%d ERDPT=%x%x EWRPT=%x%x ERXWRPT=%x%x",
+			__func__,
+			addr, size,
+			spi_enc_read(adapter, SPI_COM_RCR, ERDPTH),
+			spi_enc_read(adapter, SPI_COM_RCR, ERDPTL),
+			spi_enc_read(adapter, SPI_COM_RCR, EWRPTH),
+			spi_enc_read(adapter, SPI_COM_RCR, EWRPTL),
+			spi_enc_read(adapter, SPI_COM_RCR, ERXWRPTH),
+			spi_enc_read(adapter, SPI_COM_RCR, ERXWRPTL)
+			);
+
+	for (i = 0; i < size; ++i) {
+		buffer[i] = spi_enc_read_buffer_memory(adapter);
+	}
+}
+
+struct __attribute__ ((packed)) receive_status_vector {
+	uint16_t next_packet_ptr;
+	uint16_t rx_byte_count;
+
+	uint8_t event:1;
+	uint8_t reserved1:1;
+	uint8_t carrier_event:1;
+	uint8_t reserved2:1;
+	uint8_t crc_error:1;
+	uint8_t length_error:1;
+	uint8_t length_out_of_range:1;
+	uint8_t rx_ok:1;
+
+	uint8_t rx_multicast:1;
+	uint8_t rx_broadcast:1;
+	uint8_t dribble_nibble:1;
+	uint8_t rx_control_frame:1;
+	uint8_t rx_pause_control_frame:1;
+	uint8_t rx_unknown_opcode:1;
+	uint8_t rx_vlan_detected:1;
+	uint8_t zero:1;
+};
+
+static void enc_prepare_for_next_packet(struct enc_adapter *adapter, uint16_t next_packet_ptr)
+{
+	adapter->next_packet_ptr = next_packet_ptr;
+
+	spi_enc_write(adapter, SPI_COM_WCR, ERXRDPTL, INT16_L(next_packet_ptr));
+	spi_enc_write(adapter, SPI_COM_WCR, ERXRDPTH, INT16_H(next_packet_ptr));
+
+	spi_enc_write(adapter, SPI_COM_BFS, ECON2, ECON2_PKTDEC);
+}
+
+static void enc_irq_work_handler(struct work_struct *work)
+{
+	struct enc_adapter *adapter =
+		container_of(work, struct enc_adapter, irq_work);
+	uint8_t eie, eir, pktcnt;
+	struct receive_status_vector rsv;
+
+	/* Disable interrupts */
+	eie = spi_enc_read(adapter, SPI_COM_RCR, EIE);
+	spi_enc_write(adapter, SPI_COM_WCR, EIE, 0x0);
+
+	/* Check what kind of interrupts occurred */
+	eir = spi_enc_read(adapter, SPI_COM_RCR, EIR);
+	pktcnt = spi_enc_read(adapter, SPI_COM_RCR, EPKTCNT);
+
+	dev_info(&adapter->spi->dev, "%s: EIE=%x EIR=%x PKTCNT=%d", __func__, eie, eir, pktcnt);
+
+	for (; pktcnt-- > 0; enc_prepare_for_next_packet(adapter, rsv.next_packet_ptr)) {
+		int i = 0, frame_len;
+		uint8_t *buf;
+		struct sk_buff *skb;
+
+		enc_read_memory(adapter, adapter->next_packet_ptr, &rsv, sizeof(rsv));
+		frame_len = rsv.rx_byte_count - 4;
+
+		dev_info(&adapter->spi->dev, "%s: rx_byte_count=%d next_packet_ptr=%x",
+				__func__, rsv.rx_byte_count, rsv.next_packet_ptr);
+
+		if (!rsv.rx_ok || rsv.zero) {
+			dev_info(&adapter->spi->dev, "%s: assert: rx_ok=%d rsv.zero=%d", __func__, rsv.rx_ok, rsv.zero);
+			continue;
+		}
+
+		skb = netdev_alloc_skb_ip_align(adapter->netdev, frame_len);
+		if (!skb)
+			return;
+
+		buf = skb_put(skb, frame_len);
+		dev_info(&adapter->spi->dev, "%s: len=%d data_len=%d",
+				__func__, skb->len, skb->data_len);
+
+		for (i = 0; i < frame_len; ++i) {
+			buf[i] = spi_enc_read_buffer_memory(adapter);
+		}
+		skb->protocol = eth_type_trans(skb, adapter->netdev);
+
+		dev_info(&adapter->spi->dev, "%s: len=%d data_len=%d",
+				__func__, skb->len, skb->data_len);
+		netif_rx_ni(skb);
+	}
+
+	/* Clear interrupt flags */
+	spi_enc_write(adapter, SPI_COM_WCR, EIR, 0x0);
+
+	/* Re-enable interrupts */
+	spi_enc_write(adapter, SPI_COM_WCR, EIE, eie);
 }
 
 static int enc_probe(struct spi_device *spi)
@@ -309,18 +411,17 @@ static int enc_probe(struct spi_device *spi)
 
 	netdev = alloc_etherdev(sizeof (struct enc_adapter));
 	if (!netdev)
-		goto err_alloc;
+		return -ENOMEM;
 
 	adapter = netdev_priv(netdev);
 	adapter->netdev = netdev;
 	adapter->spi = spi;
-	adapter->current_bank = BANK_COMMON;	/* to let enc_set_bank(BANK_0) work */
+	adapter->current_bank = BANK_0;
+	INIT_WORK(&adapter->irq_work, enc_irq_work_handler);
 	spi_set_drvdata(spi, adapter);
 	SET_NETDEV_DEV(netdev, &spi->dev);
 
 	enc_soft_reset(adapter);
-	enc_set_bank(adapter, BANK_0);
-
 	spi_enc_write(adapter, SPI_COM_WCR, ECON1, 0x00);
 	spi_enc_write(adapter, SPI_COM_WCR, ECON2, ECON2_AUTOINC);
 
@@ -328,7 +429,8 @@ static int enc_probe(struct spi_device *spi)
 	dev_info(&spi->dev, "%s: revision=%d", __func__, revision);
 
 	if (revision == 0 || revision == 0xff) {
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err_netdev;
 	}
 
 	enc_init_rx(adapter);
@@ -336,15 +438,23 @@ static int enc_probe(struct spi_device *spi)
 	netdev->if_port = IF_PORT_10BASET;
 	netdev->netdev_ops = &enc_netdev_ops;
 
+	ret = request_irq(adapter->spi->irq, enc_irq_handler, 0, "enc_irq_handler", adapter);
+	if (ret < 0) {
+		goto err_netdev;
+	}
+
 	ret = register_netdev(netdev);
 	if (ret) {
-		return ret;
+		goto err_irq;
 	}
 
 	return 0;
 
-err_alloc:
-	return -ENOMEM;
+err_irq:
+	free_irq(adapter->spi->irq, adapter);
+err_netdev:
+	free_netdev(netdev);
+	return ret;
 }
 
 static int enc_remove(struct spi_device *spi)
@@ -353,6 +463,7 @@ static int enc_remove(struct spi_device *spi)
 
 	dev_info(&spi->dev, "%s", __func__);
 
+	free_irq(adapter->spi->irq, adapter);
 	unregister_netdev(adapter->netdev);
 	free_netdev(adapter->netdev);
 

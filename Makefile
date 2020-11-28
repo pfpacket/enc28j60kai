@@ -7,7 +7,7 @@ all:
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
 
-insmod:
+insmod: all
 	sudo insmod $(basename ${obj-m}).ko
 
 rmmod:
