@@ -1,6 +1,8 @@
 #ifndef ENC28J60_INCLUDED
 #define ENC28J60_INCLUDED
 
+#define ETH_CRC_SIZE	4
+
 enum bank_number {
 	BANK_0 = 0,
 	BANK_1 = 1,
@@ -107,6 +109,11 @@ const struct control_register EREVID	= CONTROL_REGISTER(BANK_3, 0x12);
 #define ERXFCON_CRCEN		0b00100000
 
 #define ESTAT_CLKRDY		0b00000001
+#define ESTAT_TXABRT		0b00000010
+#define ESTAT_RXBUSY		0b00000100
+#define ESTAT_LATECOL		0b00010000
+#define ESTAT_BUFER		0b01000000
+#define ESTAT_INT		0b10000000
 
 #define MACON1_MARXEN		0b00000001
 #define MACON1_PASSALL		0b00000010
@@ -177,6 +184,62 @@ union spi_operation {
 		uint8_t arg:5;
 		uint8_t opcode:3;
 	} op;
+};
+
+struct __attribute__ ((packed)) transmit_status_vector {
+	uint16_t tx_byte_count;
+
+	uint8_t collision_count:4;
+	uint8_t crc_error:1;
+	uint8_t length_error:1;
+	uint8_t length_out_of_range:1;
+	uint8_t done:1;
+
+	uint8_t multicast:1;
+	uint8_t broadcast:1;
+	uint8_t packet_defer:1;
+	uint8_t excessive_defer:1;
+	uint8_t excessive_collision:1;
+	uint8_t late_collision:1;
+	uint8_t giant:1;
+	uint8_t underrun:1;
+
+	uint16_t total_tx_bytes;
+
+	uint8_t control_frame:1;
+	uint8_t pause_control_frame:1;
+	uint8_t backpressure_applied:1;
+	uint8_t vlan_frame:1;
+	uint8_t zero:2;
+	uint8_t space:2;
+};
+
+#define POVERRIDE		0b00000001
+#define PCRCEN			0b00000010
+#define PPADEN			0b00000100
+#define PHUGEEN			0b00001000
+
+struct __attribute__ ((packed)) receive_status_vector {
+	uint16_t next_packet_ptr;
+	uint16_t rx_byte_count;
+
+	uint8_t event:1;
+	uint8_t reserved1:1;
+	uint8_t carrier_event:1;
+	uint8_t reserved2:1;
+	uint8_t crc_error:1;
+	uint8_t length_error:1;
+	uint8_t length_out_of_range:1;
+	uint8_t rx_ok:1;
+
+	uint8_t multicast:1;
+	uint8_t broadcast:1;
+	uint8_t dribble_nibble:1;
+	uint8_t control_frame:1;
+	uint8_t pause_control_frame:1;
+	uint8_t unknown_opcode:1;
+	uint8_t vlan_detected:1;
+	uint8_t zero:1;
 };
 
 #endif	/* ENC28J60_INCLUDED */
