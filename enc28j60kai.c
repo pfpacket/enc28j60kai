@@ -105,7 +105,6 @@ static int enc_read_memory(struct enc_adapter *adapter, uint16_t addr, void *buf
 	spi_enc_write(adapter, SPI_COM_WCR, ERDPTH, INT16_H(addr));
 
 	ret = spi_sync(adapter->spi, &msg);
-	dev_info(&adapter->spi->dev, "%s: addr=%x buf=%p size=%d ret=%d dmabuf=%p dmasize=%d", __func__, addr, buf, size, ret, adapter->dma_buf, DMA_BUFFER_SIZE);
 	if (ret)
 		return ret;
 
@@ -167,7 +166,7 @@ static void enc_wait_for_phy_ready(struct enc_adapter *adapter)
 	udelay(20);
 
 	while (spi_enc_read(adapter, SPI_COM_RCR, MISTAT) & MISTAT_BUSY) {
-		dev_warn(&adapter->spi->dev, "%s: pollnig MISTAT_BUSY", __func__);
+		dev_warn(&adapter->spi->dev, "%s: pollnig MISTAT_BUSY\n", __func__);
 		udelay(10);
 	}
 }
@@ -300,7 +299,7 @@ static netdev_tx_t enc_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	//netif_stop_queue(dev);
 
 	if (adapter->pending_skb)
-		dev_info(&adapter->spi->dev, "%s: the previous buffer isn't still processed!", __func__);
+		netdev_info(adapter->netdev, "%s: the previous buffer isn't still processed!\n", __func__);
 	adapter->pending_skb = skb;
 	schedule_work(&adapter->tx_work);
 
@@ -331,7 +330,7 @@ static int enc_set_mac_address(struct net_device *dev, void *addr)
 	if (ret)
 		return ret;
 
-	dev_info(&adapter->spi->dev, "%s: %x:%x:%x:%x:%x:%x",
+	netdev_info(dev, "%s: %x:%x:%x:%x:%x:%x\n",
 			__func__, sa->sa_data[0], sa->sa_data[1], sa->sa_data[2],
 			sa->sa_data[3], sa->sa_data[4], sa->sa_data[5]);
 
@@ -370,7 +369,7 @@ static int enc_init_rx(struct enc_adapter *adapter)
 	 * MAC initialization
 	 */
 	/*while (!(spi_enc_read(adapter, SPI_COM_RCR, ESTAT) & ESTAT_CLKRDY)) {
-		dev_info(&adapter->dev, "%s: polling ESTAT_CLKRDY", __func__);
+		netdev_info(adapter->netdev, "%s: polling ESTAT_CLKRDY\n", __func__);
 	}*/
 
 	/*
@@ -465,7 +464,7 @@ static void enc_irq_work_handler(struct work_struct *work)
 
 		enc_read_memory(adapter, adapter->next_packet_ptr, &rsv, sizeof(rsv));
 		if (!rsv.rx_ok || rsv.zero) {
-			dev_info(&adapter->spi->dev, "%s: rx failed rx_ok=%d zero=%d", __func__, rsv.rx_ok, rsv.zero);
+			netdev_warn(adapter->netdev, "%s: rx failed rx_ok=%d zero=%d\n", __func__, rsv.rx_ok, rsv.zero);
 			continue;
 		}
 
@@ -473,7 +472,7 @@ static void enc_irq_work_handler(struct work_struct *work)
 		if (!skb)
 			continue;
 
-		dev_info(&adapter->spi->dev, "%s: rx: count=%d", __func__, rsv.rx_byte_count - ETH_CRC_SIZE);
+		netdev_info(adapter->netdev, "%s: rx: count=%d\n", __func__, rsv.rx_byte_count - ETH_CRC_SIZE);
 
 		netif_rx_ni(skb);
 	}
@@ -523,14 +522,14 @@ static int enc_probe(struct spi_device *spi)
 
 	ret = dma_set_coherent_mask(&spi->dev, DMA_BIT_MASK(64));
 	if (ret) {
-		dev_warn(&spi->dev, "%s: unable to set DMA coherent mask", __func__);
+		dev_warn(&spi->dev, "%s: unable to set DMA coherent mask\n", __func__);
 		ret = -ENOMEM;
 		goto err_free_netdev;
 	}
 
 	adapter->dma_buf = dma_alloc_coherent(&spi->dev, DMA_BUFFER_SIZE, &adapter->dma_handle, GFP_KERNEL | GFP_DMA);
 	if (!adapter->dma_buf) {
-		dev_warn(&spi->dev, "%s: unable to allocate DMA buffer", __func__);
+		dev_warn(&spi->dev, "%s: unable to allocate DMA buffer\n", __func__);
 		ret = -ENOMEM;
 		goto err_free_netdev;
 	}
@@ -540,7 +539,7 @@ static int enc_probe(struct spi_device *spi)
 	spi_enc_write(adapter, SPI_COM_WCR, ECON2, ECON2_AUTOINC);
 
 	revision = spi_enc_read(adapter, SPI_COM_RCR, EREVID);
-	dev_info(&spi->dev, "%s: revision=%d", __func__, revision);
+	dev_info(&spi->dev, "%s: revision=%d\n", __func__, revision);
 
 	if (revision == 0 || revision == 0xff) {
 		ret = -EINVAL;
@@ -550,9 +549,8 @@ static int enc_probe(struct spi_device *spi)
 	enc_init_rx(adapter);
 
 	ret = request_irq(adapter->spi->irq, enc_irq_handler, 0, DRIVER_NAME, adapter);
-	if (ret < 0) {
+	if (ret < 0)
 		goto err_free_buf;
-	}
 
 	netdev->if_port = IF_PORT_10BASET;
 	netdev->irq = spi->irq;
@@ -560,9 +558,8 @@ static int enc_probe(struct spi_device *spi)
 	//netdev->watchdog_timeo = 4 * HZ;
 
 	ret = register_netdev(netdev);
-	if (ret) {
+	if (ret)
 		goto err_irq;
-	}
 
 	return 0;
 
@@ -579,7 +576,7 @@ static int enc_remove(struct spi_device *spi)
 {
 	struct enc_adapter *adapter = spi_get_drvdata(spi);
 
-	dev_info(&spi->dev, "%s", __func__);
+	netdev_info(adapter->netdev, "%s\n", __func__);
 
 	unregister_netdev(adapter->netdev);
 	free_irq(adapter->spi->irq, adapter);
@@ -591,7 +588,7 @@ static int enc_remove(struct spi_device *spi)
 
 static const struct of_device_id enc28j60kai_dev_ids[] = {
 	{ .compatible = "microchip,enc28j60" },
-	{ }
+	{}
 };
 MODULE_DEVICE_TABLE(of ,enc28j60kai_dev_ids);
 
@@ -606,5 +603,6 @@ static struct spi_driver enc_driver = {
 
 module_spi_driver(enc_driver);
 
+MODULE_DESCRIPTION("enc28j60 ethernet driver");
 MODULE_AUTHOR("Ryo Munakata");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
