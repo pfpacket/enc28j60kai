@@ -11,6 +11,9 @@
 
 #define DRIVER_NAME "enc28j60kai"
 
+#define NETDEV_LOG(level, fmt, args...) \
+	netdev_##level(adapter->netdev, "%s: " fmt "\n", __func__, ##args)
+
 #define INT16_L(n) (uint8_t)((n) & 0xff)
 #define INT16_H(n) (uint8_t)((n) >> 8)
 
@@ -257,8 +260,13 @@ static void enc_tx_handler(struct work_struct *work)
 
 	mutex_lock(&adapter->lock);
 
+	NETDEV_LOG(info, "trace: pending_skb=%p", adapter->pending_skb);
 	skb = adapter->pending_skb;
-	BUG_ON(!skb);
+	if (!skb) {
+		NETDEV_LOG(err, "BUG: invalid TX request");
+		netif_wake_queue(adapter->netdev);
+		goto err;
+	}
 
 	/* Containing control bit (1 byte), but the address itself isn't included */
 	tx_end_addr = ENC_TX_START_ADDR + skb->len;
@@ -286,8 +294,7 @@ static void enc_tx_handler(struct work_struct *work)
 	/* Start TX */
 	spi_enc_write(adapter, SPI_COM_BFS, ECON1, ECON1_TXRTS);
 
-	//netif_start_queue(adapter->netdev);
-
+err:
 	mutex_unlock(&adapter->lock);
 }
 
@@ -296,11 +303,14 @@ static netdev_tx_t enc_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct enc_adapter *adapter = netdev_priv(dev);
 
 	/* Prevent further xmit's */
-	//netif_stop_queue(dev);
+	netif_stop_queue(dev);
 
+	NETDEV_LOG(info, "trace: pending_skb=%p", adapter->pending_skb);
 	if (adapter->pending_skb)
-		netdev_info(adapter->netdev, "%s: the previous buffer isn't still processed!\n", __func__);
+		NETDEV_LOG(err, "the previous buffer isn't still processed!");
+
 	adapter->pending_skb = skb;
+	NETDEV_LOG(info, "set: pending_skb=%p", adapter->pending_skb);
 	schedule_work(&adapter->tx_work);
 
 	return NETDEV_TX_OK;
@@ -330,7 +340,7 @@ static int enc_set_mac_address(struct net_device *dev, void *addr)
 	if (ret)
 		return ret;
 
-	netdev_info(dev, "%s: %x:%x:%x:%x:%x:%x\n",
+	dev_info(&adapter->spi->dev, "%s: %x:%x:%x:%x:%x:%x\n",
 			__func__, sa->sa_data[0], sa->sa_data[1], sa->sa_data[2],
 			sa->sa_data[3], sa->sa_data[4], sa->sa_data[5]);
 
@@ -464,7 +474,7 @@ static void enc_irq_work_handler(struct work_struct *work)
 
 		enc_read_memory(adapter, adapter->next_packet_ptr, &rsv, sizeof(rsv));
 		if (!rsv.rx_ok || rsv.zero) {
-			netdev_warn(adapter->netdev, "%s: rx failed rx_ok=%d zero=%d\n", __func__, rsv.rx_ok, rsv.zero);
+			NETDEV_LOG(err, "rx failed rx_ok=%d zero=%d", rsv.rx_ok, rsv.zero);
 			continue;
 		}
 
@@ -472,7 +482,7 @@ static void enc_irq_work_handler(struct work_struct *work)
 		if (!skb)
 			continue;
 
-		netdev_info(adapter->netdev, "%s: rx: count=%d\n", __func__, rsv.rx_byte_count - ETH_CRC_SIZE);
+		NETDEV_LOG(info, "rx: count=%d", rsv.rx_byte_count - ETH_CRC_SIZE);
 
 		netif_rx_ni(skb);
 	}
@@ -484,9 +494,12 @@ static void enc_irq_work_handler(struct work_struct *work)
 		struct transmit_status_vector tsv;
 
 		//enc_read_memory(adapter, tsv_addr, &tsv, sizeof(tsv));
+		NETDEV_LOG(info, "trace: pending_skb=%p", adapter->pending_skb);
 		if (adapter->pending_skb) {
-			//dev_kfree_skb(adapter->pending_skb);
+			dev_kfree_skb(adapter->pending_skb);
 			adapter->pending_skb = NULL;
+			NETDEV_LOG(info, "set: pending_skb=%p", adapter->pending_skb);
+			netif_wake_queue(adapter->netdev);
 		}
 	}
 
@@ -576,7 +589,7 @@ static int enc_remove(struct spi_device *spi)
 {
 	struct enc_adapter *adapter = spi_get_drvdata(spi);
 
-	netdev_info(adapter->netdev, "%s\n", __func__);
+	NETDEV_LOG(info, "called");
 
 	unregister_netdev(adapter->netdev);
 	free_irq(adapter->spi->irq, adapter);
