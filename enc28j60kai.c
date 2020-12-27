@@ -85,7 +85,7 @@ static uint8_t spi_enc_read_buffer_memory(struct enc_adapter *adapter)
 	return (uint8_t)spi_w8r8(adapter->spi, SPI_COM_RBM);
 }
 
-static int enc_read_memory(struct enc_adapter *adapter, uint16_t addr, void *buf, size_t size)
+static int enc_read_buffer(struct enc_adapter *adapter, uint16_t addr, void *buf, size_t size)
 {
 	int ret;
 	void *rxbuf = adapter->dma_buf + 4;
@@ -116,52 +116,24 @@ static int enc_read_memory(struct enc_adapter *adapter, uint16_t addr, void *buf
 	return 0;
 }
 
-//static void enc_read_memory(struct enc_adapter *adapter, uint16_t addr, void *buf, size_t size)
-//{
-//	int i;
-//	uint8_t *buffer = buf;
-//
-//	spi_enc_write(adapter, SPI_COM_WCR, ERDPTL, INT16_L(addr));
-//	spi_enc_write(adapter, SPI_COM_WCR, ERDPTH, INT16_H(addr));
-//
-//	for (i = 0; i < size; ++i) {
-//		buffer[i] = spi_enc_read_buffer_memory(adapter);
-//	}
-//}
-
 static void spi_enc_write_buffer_memory(struct enc_adapter *adapter, uint8_t data)
 {
 	uint8_t txbuf[2] = {SPI_COM_WBM, data};
 	spi_write(adapter->spi, txbuf, 2);
 }
 
-//static int enc_write_memory(struct enc_adapter *adapter, uint16_t addr, const void *buf, size_t size)
-//{
-//	static uint8_t txbuf[1536];
-//
-//	if (size > ETH_MAX_FRAME_LEN)
-//		return -EINVAL;
-//
-//	spi_enc_write(adapter, SPI_COM_WCR, EWRPTL, INT16_L(addr));
-//	spi_enc_write(adapter, SPI_COM_WCR, EWRPTH, INT16_H(addr));
-//
-//	txbuf[0] = SPI_COM_WBM;
-//	memcpy(txbuf + 1, buf, size);
-//
-//	return spi_write(adapter->spi, txbuf, size + 1);
-//}
-
-static void enc_write_memory(struct enc_adapter *adapter, uint16_t addr, const void *buf, size_t size)
+static int enc_write_buffer(struct enc_adapter *adapter, uint16_t addr, const void *buf, size_t size)
 {
-	int i;
-	const uint8_t *buffer = buf;
+	if (size > ETH_MAX_FRAME_LEN)
+		return -EINVAL;
 
 	spi_enc_write(adapter, SPI_COM_WCR, EWRPTL, INT16_L(addr));
 	spi_enc_write(adapter, SPI_COM_WCR, EWRPTH, INT16_H(addr));
 
-	for (i = 0; i < size; ++i) {
-		spi_enc_write_buffer_memory(adapter, buffer[i]);
-	}
+	adapter->dma_buf[0] = SPI_COM_WBM;
+	memcpy(adapter->dma_buf + 1, buf, size);
+
+	return spi_write(adapter->spi, adapter->dma_buf, size + 1);
 }
 
 static void enc_wait_for_phy_ready(struct enc_adapter *adapter)
@@ -281,7 +253,7 @@ static void enc_tx_handler(struct work_struct *work)
 	spi_enc_write_buffer_memory(adapter, /*PHUGEEN |*/ PPADEN | PCRCEN | POVERRIDE);
 
 	/* Write the entire packet */
-	enc_write_memory(adapter, ENC_TX_START_ADDR + 1, skb_mac_header(skb), skb->len);
+	enc_write_buffer(adapter, ENC_TX_START_ADDR + 1, skb_mac_header(skb), skb->len);
 
 	/* TX buffer end pointer */
 	spi_enc_write(adapter, SPI_COM_WCR, ETXNDL, INT16_L(tx_end_addr));
@@ -447,7 +419,7 @@ static struct sk_buff *enc_read_packet(struct enc_adapter *adapter, size_t frame
 
 	/* Read an ethernet frame and write it to the skb */
 	buf = skb_put(skb, frame_len);
-	enc_read_memory(adapter, adapter->next_packet_ptr + sizeof(struct receive_status_vector), buf, frame_len);
+	enc_read_buffer(adapter, adapter->next_packet_ptr + sizeof(struct receive_status_vector), buf, frame_len);
 	skb->protocol = eth_type_trans(skb, adapter->netdev);
 
 	return skb;
@@ -472,7 +444,7 @@ static void enc_irq_work_handler(struct work_struct *work)
 	for (; pktcnt-- > 0; enc_prepare_for_next_packet(adapter, rsv.next_packet_ptr)) {
 		struct sk_buff *skb;
 
-		enc_read_memory(adapter, adapter->next_packet_ptr, &rsv, sizeof(rsv));
+		enc_read_buffer(adapter, adapter->next_packet_ptr, &rsv, sizeof(rsv));
 		if (!rsv.rx_ok || rsv.zero) {
 			NETDEV_LOG(err, "rx failed rx_ok=%d zero=%d", rsv.rx_ok, rsv.zero);
 			continue;
@@ -493,7 +465,7 @@ static void enc_irq_work_handler(struct work_struct *work)
 			 (uint16_t)spi_enc_read(adapter, SPI_COM_RCR, ETXNDL));
 		struct transmit_status_vector tsv;
 
-		//enc_read_memory(adapter, tsv_addr, &tsv, sizeof(tsv));
+		//enc_read_buffer(adapter, tsv_addr, &tsv, sizeof(tsv));
 		NETDEV_LOG(info, "trace: pending_skb=%p", adapter->pending_skb);
 		if (adapter->pending_skb) {
 			dev_kfree_skb(adapter->pending_skb);
@@ -568,7 +540,6 @@ static int enc_probe(struct spi_device *spi)
 	netdev->if_port = IF_PORT_10BASET;
 	netdev->irq = spi->irq;
 	netdev->netdev_ops = &enc_netdev_ops;
-	//netdev->watchdog_timeo = 4 * HZ;
 
 	ret = register_netdev(netdev);
 	if (ret)
