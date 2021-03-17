@@ -1,3 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * ENC28J60 register definitions
+ */
+
 #ifndef ENC28J60_INCLUDED
 #define ENC28J60_INCLUDED
 
@@ -180,13 +185,13 @@ enum spi_command {
 
 union spi_operation {
 	uint8_t raw8;
-	struct __attribute__ ((packed)) {
+	struct __packed {
 		uint8_t arg:5;
 		uint8_t opcode:3;
 	} op;
 };
 
-struct __attribute__ ((packed)) transmit_status_vector {
+struct transmit_status_vector {
 	uint16_t tx_byte_count;
 
 	uint8_t collision_count:4;
@@ -212,14 +217,14 @@ struct __attribute__ ((packed)) transmit_status_vector {
 	uint8_t vlan_frame:1;
 	uint8_t zero:2;
 	uint8_t space:2;
-};
+} __packed;
 
 #define POVERRIDE		0b00000001
 #define PCRCEN			0b00000010
 #define PPADEN			0b00000100
 #define PHUGEEN			0b00001000
 
-struct __attribute__ ((packed)) receive_status_vector {
+struct receive_status_vector {
 	uint16_t next_packet_ptr;
 	uint16_t rx_byte_count;
 
@@ -240,6 +245,6 @@ struct __attribute__ ((packed)) receive_status_vector {
 	uint8_t unknown_opcode:1;
 	uint8_t vlan_detected:1;
 	uint8_t zero:1;
-};
+} __packed;
 
 #endif	/* ENC28J60_INCLUDED */
