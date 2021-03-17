@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * ENC28J60 ethernet driver
+ */
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -14,10 +19,10 @@
 #define NETDEV_LOG(level, fmt, args...) \
 	netdev_##level(adapter->netdev, "%s: " fmt "\n", __func__, ##args)
 
-#define INT16_L(n) (uint8_t)((n) & 0xff)
-#define INT16_H(n) (uint8_t)((n) >> 8)
+#define INT16_L(n) ((uint8_t)((n) & 0xff))
+#define INT16_H(n) ((uint8_t)((n) >> 8))
 
-const uint16_t ENC_RX_START_ADDR = 0;
+const uint16_t ENC_RX_START_ADDR;
 const uint16_t ENC_RX_END_ADDR = 0x19ff;
 const uint16_t ENC_TX_START_ADDR = 0x1a00;
 const uint16_t ENC_TX_END_ADDR = 0x1fff;
@@ -119,6 +124,7 @@ static int enc_read_buffer(struct enc_adapter *adapter, uint16_t addr, void *buf
 static void spi_enc_write_buffer_memory(struct enc_adapter *adapter, uint8_t data)
 {
 	uint8_t txbuf[2] = {SPI_COM_WBM, data};
+
 	spi_write(adapter->spi, txbuf, 2);
 }
 
@@ -350,9 +356,13 @@ static int enc_init_rx(struct enc_adapter *adapter)
 	/*
 	 * MAC initialization
 	 */
-	/*while (!(spi_enc_read(adapter, SPI_COM_RCR, ESTAT) & ESTAT_CLKRDY)) {
-		netdev_info(adapter->netdev, "%s: polling ESTAT_CLKRDY\n", __func__);
-	}*/
+	/*
+	 * We are supposed to check ESTAT_CLKRDY here,
+	 * but it turns out that it is something we cannnot rely on
+	 * while (!(spi_enc_read(adapter, SPI_COM_RCR, ESTAT) & ESTAT_CLKRDY)) {
+	 *	netdev_info(adapter->netdev, "%s: polling ESTAT_CLKRDY\n", __func__);
+	 *}
+	 */
 
 	/*
 	 * Here we can't use BFC/BFS for registers other than ETH registers
@@ -507,14 +517,13 @@ static int enc_probe(struct spi_device *spi)
 
 	ret = dma_set_coherent_mask(&spi->dev, DMA_BIT_MASK(64));
 	if (ret) {
-		dev_warn(&spi->dev, "%s: unable to set DMA coherent mask\n", __func__);
 		ret = -ENOMEM;
 		goto err_free_netdev;
 	}
 
-	adapter->dma_buf = dma_alloc_coherent(&spi->dev, DMA_BUFFER_SIZE, &adapter->dma_handle, GFP_KERNEL | GFP_DMA);
+	adapter->dma_buf = dma_alloc_coherent(&spi->dev, DMA_BUFFER_SIZE,
+			&adapter->dma_handle, GFP_KERNEL | GFP_DMA);
 	if (!adapter->dma_buf) {
-		dev_warn(&spi->dev, "%s: unable to allocate DMA buffer\n", __func__);
 		ret = -ENOMEM;
 		goto err_free_netdev;
 	}
@@ -574,7 +583,7 @@ static const struct of_device_id enc28j60kai_dev_ids[] = {
 	{ .compatible = "microchip,enc28j60" },
 	{}
 };
-MODULE_DEVICE_TABLE(of ,enc28j60kai_dev_ids);
+MODULE_DEVICE_TABLE(of, enc28j60kai_dev_ids);
 
 static struct spi_driver enc_driver = {
 	.driver = {
